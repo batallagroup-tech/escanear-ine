@@ -271,7 +271,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
           <span className={`text-xs font-extrabold tracking-widest uppercase ${isDarkMode ? 'text-blue-400' : 'text-[#0F2C59]'}`}>
             Batalla Group
           </span>
-          <span className="text-[11px] text-stone-400 mt-0.5">Versión 1.0.9</span>
+          <span className="text-[11px] text-stone-400 mt-0.5">Versión 1.0.10</span>
         </div>
       </div>
     </div>

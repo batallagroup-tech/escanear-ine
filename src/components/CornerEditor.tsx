@@ -31,10 +31,23 @@ export const CornerEditor: React.FC<CornerEditorProps> = ({
   const [currentImageSrc, setCurrentImageSrc] = useState(imageSrc);
   const [corners, setCorners] = useState<CardCorners | null>(null);
   const [activeCorner, setActiveCorner] = useState<CornerKey | null>(null);
+  const [touchPos, setTouchPos] = useState<Point | null>(null);
   const [imgDimensions, setImgDimensions] = useState({ width: 0, height: 0 });
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isAutoDetecting, setIsAutoDetecting] = useState(false);
+
+  // Reticle offset distance in pixels (floats cleanly above finger so finger never blocks the corner)
+  const RETICLE_OFFSET_Y = 65;
+
+  const computeTargetFromTouch = (fingerPt: Point): Point => {
+    // If the finger is near the top edge, offset the reticle downwards so it remains in view
+    const offsetY = fingerPt.y < 110 ? RETICLE_OFFSET_Y : -RETICLE_OFFSET_Y;
+    return {
+      x: fingerPt.x,
+      y: Math.max(10, fingerPt.y + offsetY),
+    };
+  };
 
   const handleImageLoad = async () => {
     if (!imgRef.current) return;
@@ -139,42 +152,46 @@ export const CornerEditor: React.FC<CornerEditorProps> = ({
 
     ctx.drawImage(imgRef.current, sx, sy, sw, sh, 0, 0, size, size);
 
+    // Crosshairs: white outline for high contrast against dark & light backgrounds
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(radius - 16, radius);
+    ctx.lineTo(radius + 16, radius);
+    ctx.moveTo(radius, radius - 16);
+    ctx.lineTo(radius, radius + 16);
+    ctx.stroke();
+
     // Crosshairs in navy blue
     ctx.strokeStyle = '#0F2C59';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(radius - 14, radius);
-    ctx.lineTo(radius + 14, radius);
-    ctx.moveTo(radius, radius - 14);
-    ctx.lineTo(radius, radius + 14);
+    ctx.moveTo(radius - 16, radius);
+    ctx.lineTo(radius + 16, radius);
+    ctx.moveTo(radius, radius - 16);
+    ctx.lineTo(radius, radius + 16);
     ctx.stroke();
 
-    ctx.fillStyle = '#0F2C59';
+    // Center precision dot in electric blue
+    ctx.fillStyle = '#2563EB';
     ctx.beginPath();
     ctx.arc(radius, radius, 3, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.restore();
 
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 3.5;
+    // Outer border of the loupe reticle
+    ctx.strokeStyle = '#2563EB';
+    ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.arc(radius, radius, radius - 2, 0, Math.PI * 2);
     ctx.stroke();
-  };
 
-  const handleTouchMove = (clientX: number, clientY: number) => {
-    if (!activeCorner || !containerRef.current || !corners) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const screenPt = { x: clientX - rect.left, y: clientY - rect.top };
-    const imgPt = screenToImage(screenPt);
-
-    setCorners({
-      ...corners,
-      [activeCorner]: imgPt,
-    });
-
-    updateLoupe(imgPt);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(radius, radius, radius - 3.5, 0, Math.PI * 2);
+    ctx.stroke();
   };
 
   const onPointerDown = (corner: CornerKey, e: React.PointerEvent) => {
@@ -182,15 +199,39 @@ export const CornerEditor: React.FC<CornerEditorProps> = ({
     e.stopPropagation();
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     setActiveCorner(corner);
-    if (corners) {
-      updateLoupe(corners[corner]);
-    }
+
+    if (!containerRef.current || !corners) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const fingerPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    setTouchPos(fingerPt);
+
+    const targetScreen = computeTargetFromTouch(fingerPt);
+    const targetImg = screenToImage(targetScreen);
+
+    setCorners({
+      ...corners,
+      [corner]: targetImg,
+    });
+
+    updateLoupe(targetImg);
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
-    if (!activeCorner) return;
+    if (!activeCorner || !containerRef.current || !corners) return;
     e.preventDefault();
-    handleTouchMove(e.clientX, e.clientY);
+    const rect = containerRef.current.getBoundingClientRect();
+    const fingerPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    setTouchPos(fingerPt);
+
+    const targetScreen = computeTargetFromTouch(fingerPt);
+    const targetImg = screenToImage(targetScreen);
+
+    setCorners({
+      ...corners,
+      [activeCorner]: targetImg,
+    });
+
+    updateLoupe(targetImg);
   };
 
   const onPointerUp = (e: React.PointerEvent) => {
@@ -199,6 +240,7 @@ export const CornerEditor: React.FC<CornerEditorProps> = ({
         (e.target as HTMLElement).releasePointerCapture(e.pointerId);
       } catch {}
       setActiveCorner(null);
+      setTouchPos(null);
     }
   };
 
@@ -223,13 +265,6 @@ export const CornerEditor: React.FC<CornerEditorProps> = ({
   const pBL = imageToScreen(corners.bottomLeft);
 
   const activeScreenPt = activeCorner ? imageToScreen(corners[activeCorner]) : null;
-
-  const getLoupeTop = (pt: Point) => {
-    if (pt.y < 175) {
-      return pt.y + 135;
-    }
-    return Math.max(75, pt.y - 135);
-  };
 
   return (
     <div
@@ -322,10 +357,25 @@ export const CornerEditor: React.FC<CornerEditorProps> = ({
           />
         </svg>
 
-        {/* Interactive Corner Handles */}
+        {/* Dynamic Connector Line between finger handle and target crosshair while dragging */}
+        {activeCorner && touchPos && activeScreenPt && (
+          <svg className="absolute inset-0 w-full h-full pointer-events-none z-20">
+            <line
+              x1={touchPos.x}
+              y1={touchPos.y}
+              x2={activeScreenPt.x}
+              y2={activeScreenPt.y}
+              stroke="#2563EB"
+              strokeWidth="2.5"
+              strokeDasharray="4 4"
+            />
+          </svg>
+        )}
+
+        {/* Static Corner Handles (rendered for all corners not currently being dragged) */}
         {(['topLeft', 'topRight', 'bottomRight', 'bottomLeft'] as CornerKey[]).map((key) => {
+          if (activeCorner === key) return null;
           const pt = imageToScreen(corners[key]);
-          const isActive = activeCorner === key;
 
           return (
             <div
@@ -337,37 +387,48 @@ export const CornerEditor: React.FC<CornerEditorProps> = ({
                 top: `${pt.y}px`,
                 transform: 'translate(-50%, -50%)',
               }}
-              className="z-20 w-14 h-14 flex items-center justify-center cursor-grab active:cursor-grabbing"
+              className="z-25 w-14 h-14 flex items-center justify-center cursor-grab active:cursor-grabbing"
             >
-              <div
-                className={`w-7 h-7 rounded-full border-2 flex items-center justify-center shadow-lg transition-transform duration-100 ${
-                  isActive
-                    ? 'scale-125 bg-[#0F2C59] border-white'
-                    : 'bg-white border-[#2563EB]'
-                }`}
-              >
-                <div className={`w-2.5 h-2.5 rounded-full ${isActive ? 'bg-white' : 'bg-[#0F2C59]'}`} />
+              <div className="w-8 h-8 rounded-full border-2 border-[#2563EB] bg-white flex items-center justify-center shadow-lg transition-transform active:scale-110">
+                <div className="w-3 h-3 rounded-full bg-[#0F2C59]" />
               </div>
             </div>
           );
         })}
 
-        {/* Magnifier Loupe: 135px clearance away from finger */}
+        {/* Active Finger Touch Handle (the "bolita negra con blanco" directly under the user's finger) */}
+        {activeCorner && touchPos && (
+          <div
+            style={{
+              position: 'absolute',
+              left: `${touchPos.x}px`,
+              top: `${touchPos.y}px`,
+              transform: 'translate(-50%, -50%)',
+            }}
+            className="z-30 pointer-events-none flex items-center justify-center"
+          >
+            <div className="w-9 h-9 rounded-full border-2 border-white bg-[#0F2C59] flex items-center justify-center shadow-2xl scale-110">
+              <div className="w-3.5 h-3.5 rounded-full bg-white" />
+            </div>
+          </div>
+        )}
+
+        {/* Active Target Reticle (the crosshair centered directly on the exact corner of the document) */}
         {activeCorner && activeScreenPt && (
           <div
             style={{
               position: 'absolute',
               left: `${activeScreenPt.x}px`,
-              top: `${getLoupeTop(activeScreenPt)}px`,
+              top: `${activeScreenPt.y}px`,
               transform: 'translate(-50%, -50%)',
             }}
             className="z-40 pointer-events-none drop-shadow-2xl"
           >
             <canvas
               ref={loupeCanvasRef}
-              width={120}
-              height={120}
-              className="rounded-full shadow-2xl border border-white"
+              width={100}
+              height={100}
+              className="rounded-full shadow-2xl border-2 border-white"
             />
           </div>
         )}
@@ -384,7 +445,7 @@ export const CornerEditor: React.FC<CornerEditorProps> = ({
       >
         <div className={`flex items-center gap-2 text-xs font-medium ${isDarkMode ? 'text-stone-300' : 'text-stone-600'}`}>
           <ZoomIn className={`w-4 h-4 ${isDarkMode ? 'text-blue-400' : 'text-[#0F2C59]'}`} />
-          <span>La lupa se muestra lejos de tu dedo</span>
+          <span>Arrastra la bolita • La cruz apunta la esquina</span>
         </div>
 
         <button

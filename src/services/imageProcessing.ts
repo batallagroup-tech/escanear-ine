@@ -205,6 +205,150 @@ function intersectHV(
 }
 
 /**
+ * Detects an isolated ID card (INE) or Passport resting on a larger surface (e.g. white sheet of paper or desk).
+ * Looks for high-texture rectangular clusters that match standard ID-1 (1.585) or ID-3 (1.42) card geometry.
+ */
+function detectCardIsland(
+  smL: Float32Array,
+  smR: Float32Array,
+  smG: Float32Array,
+  smB: Float32Array,
+  W: number,
+  H: number,
+  bgL: number,
+  bgR: number,
+  bgG: number,
+  bgB: number,
+  docType: DocumentType,
+  fallback: CardCorners
+): { detected: boolean; confidence: number; corners: CardCorners } {
+  const cardMask = new Uint8Array(W * H);
+  const rowHits = new Int32Array(H);
+
+  for (let y = 3; y < H - 3; y++) {
+    const row = y * W;
+    let rHits = 0;
+    for (let x = 3; x < W - 3; x++) {
+      const idx = row + x;
+      const dL = Math.abs(smL[idx] - bgL);
+      const dColor = Math.hypot(smR[idx] - bgR, smG[idx] - bgG, smB[idx] - bgB);
+      const gx = Math.abs(smL[idx + 1] - smL[idx - 1]);
+      const gy = Math.abs(smL[idx + W] - smL[idx - W]);
+      if (dL > 14 || dColor > 16 || gx > 10 || gy > 10) {
+        cardMask[idx] = 1;
+        rHits++;
+      }
+    }
+    rowHits[y] = rHits;
+  }
+
+  // Find contiguous row span with card content
+  const minRowHits = Math.floor(W * 0.12);
+  let bestSegment: { y1: number; y2: number; score: number } | null = null;
+  let curStart = -1;
+
+  for (let y = 4; y < H - 4; y++) {
+    if (rowHits[y] >= minRowHits) {
+      if (curStart === -1) curStart = y;
+    } else {
+      if (curStart !== -1) {
+        const span = y - curStart;
+        if (span >= Math.floor(H * 0.08) && span <= Math.floor(H * 0.75)) {
+          let sumHits = 0;
+          for (let k = curStart; k < y; k++) sumHits += rowHits[k];
+          if (!bestSegment || sumHits > bestSegment.score) {
+            bestSegment = { y1: curStart, y2: y, score: sumHits };
+          }
+        }
+        curStart = -1;
+      }
+    }
+  }
+
+  if (curStart !== -1) {
+    const span = H - 4 - curStart;
+    if (span >= Math.floor(H * 0.08) && span <= Math.floor(H * 0.75)) {
+      let sumHits = 0;
+      for (let k = curStart; k < H - 4; k++) sumHits += rowHits[k];
+      if (!bestSegment || sumHits > bestSegment.score) {
+        bestSegment = { y1: curStart, y2: H - 4, score: sumHits };
+      }
+    }
+  }
+
+  if (!bestSegment) {
+    return { detected: false, confidence: 0, corners: fallback };
+  }
+
+  const { y1: startY, y2: endY } = bestSegment;
+  const spanH = endY - startY;
+
+  // In the row band [startY..endY], find column bounds
+  const colHits = new Int32Array(W);
+  for (let y = startY; y <= endY; y++) {
+    const row = y * W;
+    for (let x = 3; x < W - 3; x++) {
+      if (cardMask[row + x]) colHits[x]++;
+    }
+  }
+
+  const minColHits = Math.floor(spanH * 0.15);
+  let minX = -1;
+  let maxX = -1;
+  for (let x = 4; x < W - 4; x++) {
+    if (colHits[x] >= minColHits) {
+      if (minX === -1) minX = x;
+      maxX = x;
+    }
+  }
+
+  if (minX === -1 || maxX - minX < Math.floor(W * 0.15)) {
+    return { detected: false, confidence: 0, corners: fallback };
+  }
+
+  const spanW = maxX - minX;
+  const aspect = spanW / spanH;
+
+  // Expected aspect ratio: INE card 1.585, Passport 1.42
+  const targetRatio = docType === 'ine' ? 1.585 : 1.42;
+  let finalMinX = minX;
+  let finalMaxX = maxX;
+  let finalMinY = startY;
+  let finalMaxY = endY;
+
+  if (Math.abs(aspect - targetRatio) > 0.35 && docType !== 'documento') {
+    // Re-center with standard document ratio
+    const cx = (minX + maxX) / 2;
+    const cy = (startY + endY) / 2;
+    const finalW = spanW;
+    const finalH = finalW / targetRatio;
+    finalMinX = Math.max(4, Math.round(cx - finalW / 2));
+    finalMaxX = Math.min(W - 5, Math.round(cx + finalW / 2));
+    finalMinY = Math.max(4, Math.round(cy - finalH / 2));
+    finalMaxY = Math.min(H - 5, Math.round(cy + finalH / 2));
+  }
+
+  const padX = Math.max(1, Math.round((finalMaxX - finalMinX) * 0.015));
+  const padY = Math.max(1, Math.round((finalMaxY - finalMinY) * 0.015));
+
+  const cTL = { x: Math.max(3, finalMinX - padX), y: Math.max(3, finalMinY - padY) };
+  const cTR = { x: Math.min(W - 4, finalMaxX + padX), y: Math.max(3, finalMinY - padY) };
+  const cBR = { x: Math.min(W - 4, finalMaxX + padX), y: Math.min(H - 4, finalMaxY + padY) };
+  const cBL = { x: Math.max(3, finalMinX - padX), y: Math.min(H - 4, finalMaxY + padY) };
+
+  return {
+    detected: true,
+    confidence: 86,
+    corners: {
+      topLeft: cTL,
+      topRight: cTR,
+      bottomRight: cBR,
+      bottomLeft: cBL,
+    },
+  };
+}
+
+/**
  * Genius Scan-style 4-corner quadrilateral detector from raw RGBA pixel buffer.
  * Works both on live camera frames (e.g. 180x240) and static images.
  * Detects tilted documents, receipts, credentials (INE), and sheets against wood, fabric, or dark/light desks.
@@ -365,6 +509,10 @@ export function detectDocumentQuadFromPixels(
   const coreVsBorderColor = Math.hypot(docR - bgR, docG - bgG, docB - bgB);
   const coreVsBorderLum = docL - bgL;
   if (docL < 80 || (coreVsBorderLum < 18 && coreVsBorderColor < 26)) {
+    // If the center lacks contrast with the perimeter (e.g. card sitting on a white sheet or large desk),
+    // detect the card island feature:
+    const island = detectCardIsland(smL, smR, smG, smB, W, H, bgL, bgR, bgG, bgB, docType, fallback);
+    if (island.detected) return island;
     return { detected: false, confidence: 0, corners: fallback };
   }
 
@@ -691,6 +839,8 @@ export function detectDocumentQuadFromPixels(
   const confidence = Math.min(100, Math.round((avgInlierRatio * 0.65 + pointSupport * 0.35) * 100));
 
   if (confidence < 52) {
+    const island = detectCardIsland(smL, smR, smG, smB, W, H, bgL, bgR, bgG, bgB, docType, fallback);
+    if (island.detected) return island;
     return { detected: false, confidence, corners: fallback };
   }
 
